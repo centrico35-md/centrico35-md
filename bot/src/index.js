@@ -1,15 +1,17 @@
 import 'dotenv/config';
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, downloadContentFromMessage } from '@whiskeysockets/baileys';
 import P from 'pino';
-import qrcode from 'qrcode-terminal';
 import mongoose from 'mongoose';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+const BOT_NAME = process.env.BOT_NAME || 'CENTRICO-MD';
+const OWNER_NAME = process.env.OWNER_NAME || 'YOUNGEST BILLIONAIRE';
 const PREFIX = process.env.PREFIX || '!';
+const PAIRING_NUMBER = (process.env.PAIRING_NUMBER || '2349022190699').replace(/\D/g, '');
 const AUTH_DIR = process.env.AUTH_DIR || './auth';
 const MEDIA_DIR = process.env.MEDIA_DIR || './media';
-const admins = new Set((process.env.ADMIN_NUMBERS || '').split(',').map(x => x.trim()).filter(Boolean));
+const admins = new Set((process.env.ADMIN_NUMBERS || PAIRING_NUMBER).split(',').map(x => x.trim().replace(/\D/g, '')).filter(Boolean));
 const rate = new Map();
 
 const Message = mongoose.models.Message || mongoose.model('Message', new mongoose.Schema({
@@ -54,13 +56,24 @@ async function start() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
   const sock = makeWASocket({ version, auth: state, logger: P({ level: 'silent' }), printQRInTerminal: false, markOnlineOnConnect: false });
+
+  if (!state.creds.registered) {
+    if (!PAIRING_NUMBER) throw new Error('PAIRING_NUMBER is required for pairing-code login.');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const code = await sock.requestPairingCode(PAIRING_NUMBER);
+    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`${BOT_NAME} PAIRING CODE: ${code}`);
+    console.log(`Number: +${PAIRING_NUMBER}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    console.log('On WhatsApp: Settings → Linked devices → Link a device → Link with phone number instead.');
+  }
+
   sock.ev.on('creds.update', saveCreds);
-  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-    if (qr) qrcode.generate(qr, { small: true });
-    if (connection === 'open') console.log('CENTRICO-MD connected.');
+  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+    if (connection === 'open') console.log(`${BOT_NAME} connected as ${OWNER_NAME}.`);
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
-      if (code !== DisconnectReason.loggedOut) setTimeout(start, 3000); else console.error('Logged out; delete auth and pair again.');
+      if (code !== DisconnectReason.loggedOut) setTimeout(start, 3000); else console.error('Logged out; remove auth and pair again.');
     }
   });
   sock.ev.on('group-participants.update', async ({ id, participants, action }) => {
@@ -76,13 +89,16 @@ async function start() {
         const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
         if (m.message.imageMessage || m.message.videoMessage || m.message.audioMessage || m.message.documentMessage) await mediaToDisk(sock, m);
         if (!text.startsWith(PREFIX)) {
-          if (/^(hi|hello|hey)$/i.test(text.trim())) await sock.sendPresenceUpdate('composing', m.key.remoteJid), await sock.sendMessage(m.key.remoteJid, { text: '👋 Hello! Send !help for commands.' });
+          if (/^(hi|hello|hey)$/i.test(text.trim())) {
+            await sock.sendPresenceUpdate('composing', m.key.remoteJid);
+            await sock.sendMessage(m.key.remoteJid, { text: `👋 Hello! I’m ${BOT_NAME}. Send ${PREFIX}help for commands.` });
+          }
           continue;
         }
-        const [cmd, ...args] = text.slice(PREFIX.length).trim().split(/\s+/); const chat = m.key.remoteJid;
-        if (cmd === 'help') await sock.sendMessage(chat, { text: `╭━━〔 CENTRICO-MD 〕━━⬣\n│ ${PREFIX}help\n│ ${PREFIX}info\n│ ${PREFIX}ping\n│ ${PREFIX}tagall (admin)\n│ ${PREFIX}kick @user (admin)\n╰━━━━━━━━━━━━⬣` });
+        const [cmd] = text.slice(PREFIX.length).trim().split(/\s+/); const chat = m.key.remoteJid;
+        if (cmd === 'help') await sock.sendMessage(chat, { text: `╭━━〔 🤖 ${BOT_NAME} 〕━━⬣\n│ 👑 Owner: ${OWNER_NAME}\n│ ⚡ Prefix: ${PREFIX}\n│ ${PREFIX}help\n│ ${PREFIX}info\n│ ${PREFIX}ping\n│ ${PREFIX}tagall (admin)\n│ ${PREFIX}kick @user (admin)\n╰━━━━━━━━━━━━━━━━⬣` });
         else if (cmd === 'ping') await sock.sendMessage(chat, { text: '🏓 Pong!' });
-        else if (cmd === 'info') await sock.sendMessage(chat, { text: `🤖 CENTRICO-MD\n⚡ Prefix: ${PREFIX}\n📦 Baileys MD bot` });
+        else if (cmd === 'info') await sock.sendMessage(chat, { text: `🤖 ${BOT_NAME}\n👑 Owner: ${OWNER_NAME}\n📱 Admin: +${PAIRING_NUMBER}\n⚡ Prefix: ${PREFIX}\n📦 Baileys MD bot` });
         else if (cmd === 'tagall' && isGroup(m) && isAdmin(m)) { const meta = await sock.groupMetadata(chat); await sock.sendMessage(chat, { text: meta.participants.map(p => `@${p.id.split('@')[0]}`).join(' '), mentions: meta.participants.map(p => p.id) }); }
         else if (cmd === 'kick' && isGroup(m) && isAdmin(m)) { const mentioned = m.message.extendedTextMessage?.contextInfo?.mentionedJid || []; if (mentioned.length) await sock.groupParticipantsUpdate(chat, mentioned, 'remove'); }
         else if (cmd === 'kick' || cmd === 'tagall') await sock.sendMessage(chat, { text: '❌ Admin permission required.' });
